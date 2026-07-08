@@ -45,9 +45,12 @@ dataset = datasets.ImageFolder(
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
 
+generator = torch.Generator().manual_seed(42)
+
 train_dataset, val_dataset = random_split(
     dataset,
-    [train_size, val_size]
+    [train_size, val_size],
+    generator=generator
 )
 
 # NOTE:
@@ -80,9 +83,11 @@ model = models.resnet18(
 )
 
 # Replace final layer for 3 classes
+num_classes = len(dataset.classes)
+
 model.fc = nn.Linear(
     model.fc.in_features,
-    3
+    num_classes
 )
 
 
@@ -130,13 +135,18 @@ images, labels = next(iter(train_loader))
 print("\nImage Batch Shape:", images.shape)
 print("Label Batch Shape:", labels.shape)
 
+best_accuracy = 0
 
 # Training
 
 
-epochs = 5
+epochs = 15
 
 for epoch in range(epochs):
+
+    # -----------------------
+    # Training
+    # -----------------------
 
     model.train()
 
@@ -144,44 +154,107 @@ for epoch in range(epochs):
     correct = 0
     total = 0
 
+
     for images, labels in train_loader:
 
         images = images.to(device)
         labels = labels.to(device)
 
+
         optimizer.zero_grad()
+
 
         outputs = model(images)
 
-        loss = criterion(outputs, labels)
+
+        loss = criterion(
+            outputs,
+            labels
+        )
+
 
         loss.backward()
 
+
         optimizer.step()
+
 
         running_loss += loss.item()
 
+
         _, predicted = torch.max(outputs, 1)
 
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
 
-    accuracy = 100 * correct / total
+        total += labels.size(0)
+
+        correct += (
+            predicted == labels
+        ).sum().item()
+
+
+    train_accuracy = 100 * correct / total
+
+
+
+    # -----------------------
+    # Validation
+    # -----------------------
+
+    model.eval()
+
+    val_correct = 0
+    val_total = 0
+
+
+    with torch.no_grad():
+
+        for images, labels in val_loader:
+
+            images = images.to(device)
+            labels = labels.to(device)
+
+
+            outputs = model(images)
+
+
+            _, predicted = torch.max(
+                outputs,
+                1
+            )
+
+
+            val_total += labels.size(0)
+
+
+            val_correct += (
+                predicted == labels
+            ).sum().item()
+
+
+
+    val_accuracy = (
+        100 * val_correct / val_total
+    )
+
 
     print(
         f"Epoch {epoch+1}/{epochs} | "
         f"Loss: {running_loss:.4f} | "
-        f"Accuracy: {accuracy:.2f}%"
+        f"Train Accuracy: {train_accuracy:.2f}% | "
+        f"Validation Accuracy: {val_accuracy:.2f}%"
     )
 
 
 # Save Model
 
 
-torch.save(
-    model.state_dict(),
-    "model.pth"
-)
+if val_accuracy > best_accuracy:
 
-print("\nTraining Complete!")
-print("Model saved as model.pth")
+    best_accuracy = val_accuracy
+
+    torch.save(
+        model.state_dict(),
+        "best_model.pth"
+    )
+
+    print("Best model saved!")
