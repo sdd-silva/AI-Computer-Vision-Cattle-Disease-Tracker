@@ -161,6 +161,12 @@ The model was trained on a cattle disease dataset containing three classes:
 
 Additional diseases can be added by expanding the dataset and retraining the model.
 
+The dataset is too large to be included in this repository.
+
+Download it from:
+
+- Kaggle: https://www.kaggle.com/datasets/devang03mgr/cattle-diseases-datasets
+
 ---
 
 ## Future Improvements
@@ -182,13 +188,13 @@ Additional diseases can be added by expanding the dataset and retraining the mod
 Clone the repository:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/animal-health-ai.git
+git clone https://github.com/Thefiesta223/AI-Computer-Vision-Cattle-Disease-Tracker.git
 ```
 
 Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+pip install -r "requirements.txt"
 ```
 
 Run:
