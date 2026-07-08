@@ -1,13 +1,44 @@
 import cv2
-import mediapipe as mp
+import torch
+import torch.nn as nn
+
+from torchvision import models, transforms
+from PIL import Image
 
 
-mp_face = mp.solutions.face_detection
+classes = [
+    "foot-and-mouth",
+    "healthy",
+    "lumpy"
+]
 
-face_detector = mp_face.FaceDetection(
-    model_selection=0,
-    min_detection_confidence=0.5
+
+# Load model
+
+model = models.resnet18(
+    weights=None
 )
+
+model.fc = nn.Linear(
+    model.fc.in_features,
+    3
+)
+
+
+model.load_state_dict(
+    torch.load(
+        "best_model.pth",
+        map_location="cpu"
+    )
+)
+
+model.eval()
+
+
+transform = transforms.Compose([
+    transforms.Resize((224,224)),
+    transforms.ToTensor()
+])
 
 
 camera = cv2.VideoCapture(0)
@@ -27,55 +58,57 @@ while True:
     )
 
 
-    results = face_detector.process(rgb)
+    image = Image.fromarray(rgb)
+
+    image = transform(image)
+
+    image = image.unsqueeze(0)
 
 
-    if results.detections:
+    with torch.no_grad():
 
-        for detection in results.detections:
+        output = model(image)
 
-            box = detection.location_data.relative_bounding_box
+        probabilities = torch.softmax(
+            output,
+            dim=1
+        )
 
-            h,w,_ = frame.shape
-
-            x=int(box.xmin*w)
-            y=int(box.ymin*h)
-
-            width=int(box.width*w)
-            height=int(box.height*h)
-
-
-            cv2.rectangle(
-                frame,
-                (x,y),
-                (x+width,y+height),
-                (0,255,0),
-                2
-            )
+        confidence, prediction = torch.max(
+            probabilities,
+            1
+        )
 
 
-            cv2.putText(
-                frame,
-                "Cow detected",
-                (x,y-10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0,255,0),
-                2
-            )
+    label = classes[prediction.item()]
+
+
+    text = (
+        f"{label} "
+        f"{confidence.item()*100:.1f}%"
+    )
+
+
+    cv2.putText(
+        frame,
+        text,
+        (20,50),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0,255,0),
+        2
+    )
 
 
     cv2.imshow(
-        "AI Face Detector",
+        "Disease Classifier",
         frame
     )
 
 
-    if cv2.waitKey(1)==ord("q"):
+    if cv2.waitKey(1) == ord("q"):
         break
 
 
 camera.release()
 cv2.destroyAllWindows()
-
-
