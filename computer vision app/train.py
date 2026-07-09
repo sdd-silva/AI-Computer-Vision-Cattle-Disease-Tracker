@@ -53,9 +53,7 @@ train_dataset, val_dataset = random_split(
     generator=generator
 )
 
-# NOTE:
-# This changes the transform for the underlying dataset.
-# We'll improve this in the next version.
+
 val_dataset.dataset.transform = val_transform
 
 
