@@ -37,17 +37,17 @@ Camera / Image
         ▼
 +----------------+
 |     YOLO11     |
-| Animal Detection |
+|Animal Detection|
 +----------------+
         │
         ▼
 Crop Detected Cow
         │
         ▼
-+----------------+
-|   ResNet18     |
-| Disease Classifier |
-+----------------+
++------------------+
+|     ResNet18     |
+|Disease Classifier|
++------------------+
         │
         ▼
 Disease Prediction
