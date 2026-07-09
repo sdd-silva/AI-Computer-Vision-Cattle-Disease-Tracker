@@ -194,7 +194,7 @@ git clone https://github.com/Thefiesta223/AI-Computer-Vision-Cattle-Disease-Trac
 Install dependencies:
 
 ```bash
-pip install -r "requirements.txt"
+pip install -r requirements.txt
 ```
 
 Run:
