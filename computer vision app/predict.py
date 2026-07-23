@@ -1,132 +1,135 @@
+# Run with:
+# python predict.py image_name.file_type
+
+import argparse
+from datetime import datetime, timezone
+import os
 from pathlib import Path
 import sys
+from urllib.parse import quote
 
+from PIL import Image
+import requests
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
-from PIL import Image
-
-
-
-# Paths
 
 
 BASE_DIR = Path(__file__).parent
-
 MODEL_PATH = BASE_DIR / "best_model.pth"
-
-
-
-# Classes
-
-
-classes = [
-    "foot-and-mouth",
-    "healthy",
-    "lumpy"
-]
-
-
-
-# Image Transform
-
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor()
-])
-
-
-
-# Load Model
-
-
-model = models.resnet18(
-    weights=None
-)
-
-model.fc = nn.Linear(
-    model.fc.in_features,
-    3
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
+FIREBASE_API_KEY = os.getenv(
+    "FIREBASE_API_KEY",
+    "",
 )
 
 
-model.load_state_dict(
-    torch.load(
-        MODEL_PATH,
-        map_location="cpu"
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Predict a cattle disease and save the result to Cloud Firestore."
+        )
     )
-)
-
-model.eval()
-
-print("Model loaded")
-
-
-
-# Get Image Path
+    parser.add_argument("image", help="Path to the image to classify")
+    parser.add_argument(
+        "--collection",
+        default=os.getenv("FIREBASE_COLLECTION", "predictions"),
+        help="Firestore collection name (default: predictions)",
+    )
+    return parser.parse_args(), parser
 
 
-if len(sys.argv) < 2:
+def save_prediction(collection, prediction, confidence, image_path):
+    collection_name = quote(collection, safe="")
+    endpoint = (
+        "https://firestore.googleapis.com/v1/"
+        f"projects/{FIREBASE_PROJECT_ID}/databases/(default)/"
+        f"documents/{collection_name}"
+    )
+    payload = {
+        "fields": {
+            "prediction": {"stringValue": prediction},
+            "confidence": {"doubleValue": confidence},
+            "confidence_percent": {"doubleValue": confidence * 100},
+            "image_name": {"stringValue": image_path.name},
+            "created_at": {
+                "timestampValue": datetime.now(timezone.utc).isoformat()
+            },
+        }
+    }
+    response = requests.post(
+        endpoint,
+        params={"key": FIREBASE_API_KEY},
+        json=payload,
+        timeout=20,
+    )
+    if not response.ok:
+        try:
+            firebase_message = response.json()["error"]["message"]
+        except (KeyError, TypeError, ValueError):
+            firebase_message = response.text
+        raise RuntimeError(
+            f"Firestore returned HTTP {response.status_code}: "
+            f"{firebase_message}"
+        )
+
+    document_name = response.json()["name"]
+    return document_name.rsplit("/", 1)[-1]
+
+
+def main():
+    args, parser = parse_arguments()
+    image_path = Path(args.image).expanduser().resolve()
+
+    if not image_path.is_file():
+        parser.error(f"Image does not exist: {image_path}")
+
+    checkpoint = torch.load(MODEL_PATH, map_location="cpu")
+    classes = checkpoint["classes"]
+
+    transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+        ]
+    )
+
+    model = models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, len(classes))
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    image = Image.open(image_path).convert("RGB")
+    image_tensor = transform(image).unsqueeze(0)
+
+    with torch.no_grad():
+        output = model(image_tensor)
+        probabilities = torch.softmax(output, dim=1)
+        confidence, prediction = torch.max(probabilities, 1)
+
+    predicted_class = classes[prediction.item()]
+    confidence_value = float(confidence.item())
+
+    print("Prediction:", predicted_class)
+    print("Confidence:", f"{confidence_value * 100:.2f}%")
+
+    try:
+        document_id = save_prediction(
+            args.collection,
+            predicted_class,
+            confidence_value,
+            image_path,
+        )
+    except Exception as error:
+        print(f"Firebase save failed: {error}", file=sys.stderr)
+        return 1
+
     print(
-        "Usage: python predict.py image.jpg"
+        f"Saved to Firestore collection '{args.collection}' "
+        f"with document ID: {document_id}"
     )
-    exit()
+    return 0
 
 
-image_path = sys.argv[1]
-
-
-
-# Load Image
-
-
-image = Image.open(
-    image_path
-).convert("RGB")
-
-
-image = transform(image)
-
-
-# Add batch dimension
-
-image = image.unsqueeze(0)
-
-
-
-# Prediction
-
-
-with torch.no_grad():
-
-    output = model(image)
-
-    probabilities = torch.softmax(
-        output,
-        dim=1
-    )
-
-
-    confidence, prediction = torch.max(
-        probabilities,
-        1
-    )
-
-
-
-# Result
-
-
-print()
-
-print(
-    "Prediction:",
-    classes[prediction.item()]
-)
-
-
-print(
-    "Confidence:",
-    f"{confidence.item()*100:.2f}%"
-)
+if __name__ == "__main__":
+    sys.exit(main())
