@@ -9,9 +9,9 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, models
 
 
-# --------------------------------------------------
+
 # Configuration
-# --------------------------------------------------
+
 
 BASE_DIR = Path(__file__).parent
 DATASET_DIR = BASE_DIR / "udder_dataset"
@@ -25,9 +25,9 @@ RANDOM_SEED = 42
 EARLY_STOPPING_PATIENCE = 6
 
 
-# --------------------------------------------------
+
 # Reproducibility
-# --------------------------------------------------
+
 
 random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
@@ -36,9 +36,9 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(RANDOM_SEED)
 
 
-# --------------------------------------------------
+
 # Device
-# --------------------------------------------------
+
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -50,9 +50,9 @@ else:
 print("Device:", device)
 
 
-# --------------------------------------------------
+
 # Image transformations
-# --------------------------------------------------
+
 
 imagenet_mean = [0.485, 0.456, 0.406]
 imagenet_std = [0.229, 0.224, 0.225]
@@ -88,9 +88,9 @@ val_transform = transforms.Compose([
 ])
 
 
-# --------------------------------------------------
+
 # Load datasets
-# --------------------------------------------------
+
 
 if not DATASET_DIR.exists():
     raise FileNotFoundError(
@@ -126,9 +126,9 @@ if num_classes != 2:
     )
 
 
-# --------------------------------------------------
+
 # Stratified train/validation split
-# --------------------------------------------------
+
 
 split_random = random.Random(RANDOM_SEED)
 
@@ -178,9 +178,9 @@ val_subset = Subset(
 )
 
 
-# --------------------------------------------------
+
 # Data loaders
-# --------------------------------------------------
+
 
 train_loader = DataLoader(
     train_subset,
@@ -199,9 +199,9 @@ val_loader = DataLoader(
 )
 
 
-# --------------------------------------------------
+
 # Calculate class weights
-# --------------------------------------------------
+# 
 
 train_class_counts = [0] * num_classes
 
@@ -226,9 +226,9 @@ print("Training class counts:", train_class_counts)
 print("Class weights:", class_weights)
 
 
-# --------------------------------------------------
+# 
 # Model
-# --------------------------------------------------
+# 
 
 model = models.resnet18(
     weights=models.ResNet18_Weights.DEFAULT
@@ -251,9 +251,9 @@ model.fc = nn.Linear(
 model = model.to(device)
 
 
-# --------------------------------------------------
+
 # Loss and optimizer
-# --------------------------------------------------
+
 
 criterion = nn.CrossEntropyLoss(
     weight=class_weights_tensor
@@ -271,9 +271,9 @@ optimizer = optim.AdamW([
 ], weight_decay=0.0001)
 
 
-# --------------------------------------------------
+
 # Training variables
-# --------------------------------------------------
+
 
 best_accuracy = 0.0
 best_weights = copy.deepcopy(model.state_dict())
@@ -281,9 +281,9 @@ best_weights = copy.deepcopy(model.state_dict())
 epochs_without_improvement = 0
 
 
-# --------------------------------------------------
+
 # Training loop
-# --------------------------------------------------
+
 
 for epoch in range(EPOCHS):
 
@@ -408,9 +408,9 @@ for epoch in range(EPOCHS):
         break
 
 
-# --------------------------------------------------
+
 # Finished
-# --------------------------------------------------
+
 
 model.load_state_dict(best_weights)
 
