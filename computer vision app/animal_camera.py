@@ -1,262 +1,616 @@
-from pathlib import Path
+# Whole-cow camera:
+# python animal_camera.py --mode cow
+#
+# Udder close-up camera:
+# python animal_camera.py --mode udder
+
+import argparse
 from collections import Counter
 from datetime import datetime, timezone
 import os
+from pathlib import Path
 import time
 
 import cv2
+from PIL import Image
 import requests
 import torch
 import torch.nn as nn
-
-from ultralytics import YOLO
 from torchvision import models, transforms
-from PIL import Image
+from ultralytics import YOLO
 
 
 
-# Paths
+# Configuration
 
 
 BASE_DIR = Path(__file__).parent
 
-MODEL_PATH = BASE_DIR / "best_model.pth"
+MODEL_PATHS = {
+    "cow": BASE_DIR / "best_model.pth",
+    "udder": BASE_DIR / "udder_model.pth",
+}
+
 YOLO_PATH = BASE_DIR / "yolo11n.pt"
 
 FIREBASE_API_KEY = os.getenv(
     "FIREBASE_API_KEY",
-    "YOUR API KEY",
+    "AIzaSyDSHECu0Qzc6oJQ4jtpcj3bqTssq79dLzI"
 )
+
 FIREBASE_DATABASE_URL = os.getenv(
     "FIREBASE_DATABASE_URL",
-    "YOUR URL"
-    "FIREBASE REIGION",
+    "https://ai-powered-smart-livestock-default-rtdb.asia-southeast1.firebasedatabase.app"
 ).rstrip("/")
-FIREBASE_PATH = os.getenv("FIREBASE_PATH", "animal_camera/latest")
-FIREBASE_UPDATE_INTERVAL = float(
-    os.getenv("FIREBASE_UPDATE_INTERVAL", "5")
+
+FIREBASE_PATH = os.getenv(
+    "FIREBASE_PATH",
+    "animal_camera/latest"
 )
 
+FIREBASE_UPDATE_INTERVAL = float(
+    os.getenv(
+        "FIREBASE_UPDATE_INTERVAL",
+        "5"
+    )
+)
 
-def save_prediction_to_firebase(prediction, confidence):
-    """Write the latest camera result to Firebase Realtime Database."""
-    endpoint = f"{FIREBASE_DATABASE_URL}/{FIREBASE_PATH}.json"
+HISTORY_SIZE = 20
+COW_DETECTION_THRESHOLD = 0.50
+
+
+
+# Arguments
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="Cattle disease camera"
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=["cow", "udder"],
+        default="cow",
+        help=(
+            "Use 'cow' for whole-cow disease detection "
+            "or 'udder' for mastitis detection."
+        )
+    )
+
+    parser.add_argument(
+        "--camera",
+        type=int,
+        default=0,
+        help="Camera index, normally 0"
+    )
+
+    parser.add_argument(
+        "--no-firebase",
+        action="store_true",
+        help="Do not upload predictions to Firebase"
+    )
+
+    return parser.parse_args()
+
+
+
+# Device
+
+
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+
+    return torch.device("cpu")
+
+
+# Firebase
+
+
+def save_prediction_to_firebase(
+    prediction,
+    confidence,
+    model_mode
+):
+    if not FIREBASE_DATABASE_URL:
+        raise RuntimeError(
+            "FIREBASE_DATABASE_URL is not configured"
+        )
+
+    endpoint = (
+        f"{FIREBASE_DATABASE_URL}/"
+        f"{FIREBASE_PATH}.json"
+    )
+
     payload = {
         "prediction": prediction,
         "confidence": confidence,
         "confidence_percent": confidence * 100,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "model_mode": model_mode,
+        "updated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
+
+    request_parameters = {}
+
+    if FIREBASE_API_KEY:
+        request_parameters["key"] = FIREBASE_API_KEY
+
     response = requests.put(
         endpoint,
-        params={"key": FIREBASE_API_KEY},
+        params=request_parameters,
         json=payload,
         timeout=10,
     )
+
     if not response.ok:
         raise RuntimeError(
-            f"Firebase returned HTTP {response.status_code}: "
+            f"Firebase returned HTTP "
+            f"{response.status_code}: "
             f"{response.text}"
         )
 
 
 
-# Load Checkpoint
+# Model transform
 
 
-checkpoint = torch.load(
-    MODEL_PATH,
-    map_location="cpu"
-)
+def create_transform(checkpoint):
+    image_size = checkpoint.get(
+        "image_size",
+        224
+    )
 
-classes = checkpoint["classes"]
+    normalization_mean = checkpoint.get(
+        "normalization_mean"
+    )
 
+    normalization_std = checkpoint.get(
+        "normalization_std"
+    )
 
+    # New udder model
+    if (
+        normalization_mean is not None
+        and normalization_std is not None
+    ):
+        return transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=normalization_mean,
+                std=normalization_std
+            ),
+        ])
 
-# Prediction Smoothing
-
-
-prediction_history = []
-
-HISTORY_SIZE = 20
-last_firebase_update = 0.0
-
-
-
-# Load Disease Model
-
-
-disease_model = models.resnet18(
-    weights=None
-)
-
-disease_model.fc = nn.Linear(
-    disease_model.fc.in_features,
-    len(classes)
-)
-
-disease_model.load_state_dict(
-    checkpoint["model_state_dict"]
-)
-
-disease_model.eval()
-
-print("Disease model loaded")
-
-
-
-# Load YOLO
-
-
-animal_detector = YOLO(YOLO_PATH)
-
-print("YOLO loaded")
+    # Original cow model
+    return transforms.Compose([
+        transforms.Resize(
+            (image_size, image_size)
+        ),
+        transforms.ToTensor(),
+    ])
 
 
 
-# Image Transform
+# Load disease model
 
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor()
-])
+def load_disease_model(
+    model_path,
+    device
+):
+    if not model_path.is_file():
+        raise FileNotFoundError(
+            f"Model not found: {model_path}"
+        )
+
+    checkpoint = torch.load(
+        model_path,
+        map_location="cpu"
+    )
+
+    classes = checkpoint["classes"]
+
+    model = models.resnet18(
+        weights=None
+    )
+
+    model.fc = nn.Linear(
+        model.fc.in_features,
+        len(classes)
+    )
+
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
+
+    model = model.to(device)
+    model.eval()
+
+    transform = create_transform(
+        checkpoint
+    )
+
+    return model, classes, transform
 
 
 
-# Camera
+# Disease prediction
 
 
-camera = cv2.VideoCapture(0)
+def classify_image(
+    image,
+    model,
+    classes,
+    transform,
+    device
+):
+    image_tensor = transform(
+        image
+    ).unsqueeze(0).to(device)
 
-while True:
+    with torch.no_grad():
+        outputs = model(image_tensor)
 
-    ret, frame = camera.read()
+        probabilities = torch.softmax(
+            outputs,
+            dim=1
+        )
 
-    if not ret:
-        break
+        confidence, prediction = torch.max(
+            probabilities,
+            dim=1
+        )
 
-    results = animal_detector(frame)
+    predicted_class = classes[
+        prediction.item()
+    ]
+
+    confidence_value = float(
+        confidence.item()
+    )
+
+    return predicted_class, confidence_value
+
+
+
+# Smooth predictions
+
+
+def smooth_prediction(history):
+    labels = [
+        label
+        for label, _ in history
+    ]
+
+    final_prediction = Counter(
+        labels
+    ).most_common(1)[0][0]
+
+    matching_confidences = [
+        confidence
+        for label, confidence in history
+        if label == final_prediction
+    ]
+
+    final_confidence = sum(
+        matching_confidences
+    ) / len(matching_confidences)
+
+    return final_prediction, final_confidence
+
+
+
+# Find best cow
+
+
+def find_best_cow(
+    frame,
+    animal_detector
+):
+    results = animal_detector(
+        frame,
+        verbose=False
+    )
+
+    best_box = None
+    best_confidence = 0.0
+
+    frame_height, frame_width = frame.shape[:2]
 
     for result in results:
-
         for box in result.boxes:
+            class_id = int(
+                box.cls[0]
+            )
 
-            confidence = float(box.conf[0])
+            confidence = float(
+                box.conf[0]
+            )
 
-            class_id = int(box.cls[0])
-
-            # COCO class 19 = cow
-            if class_id == 19 and confidence > 0.5:
-
+            # COCO class 19 is cow
+            if (
+                class_id == 19
+                and confidence
+                > COW_DETECTION_THRESHOLD
+                and confidence
+                > best_confidence
+            ):
                 x1, y1, x2, y2 = map(
                     int,
                     box.xyxy[0]
                 )
 
-                cow = frame[y1:y2, x1:x2]
+                x1 = max(0, min(x1, frame_width))
+                x2 = max(0, min(x2, frame_width))
+                y1 = max(0, min(y1, frame_height))
+                y2 = max(0, min(y2, frame_height))
 
-                if cow.size == 0:
-                    continue
-
-                rgb = cv2.cvtColor(
-                    cow,
-                    cv2.COLOR_BGR2RGB
-                )
-
-                image = Image.fromarray(rgb)
-
-                image = transform(image)
-
-                image = image.unsqueeze(0)
-
-                # Disease Prediction
-
-                with torch.no_grad():
-
-                    outputs = disease_model(image)
-
-                    probabilities = torch.softmax(
-                        outputs,
-                        dim=1
+                if x2 > x1 and y2 > y1:
+                    best_box = (
+                        x1,
+                        y1,
+                        x2,
+                        y2
                     )
 
-                    disease_confidence, prediction = torch.max(
-                        probabilities,
-                        1
-                    )
+                    best_confidence = confidence
 
-                current_prediction = classes[
-                    prediction.item()
-                ]
+    return best_box
 
-                # Prediction Smoothing
 
-                prediction_history.append(
-                    current_prediction
-                )
 
-                if len(prediction_history) > HISTORY_SIZE:
-                    prediction_history.pop(0)
+# Main camera program
 
-                final_prediction = Counter(
-                    prediction_history
-                ).most_common(1)[0][0]
 
-                final_confidence = (
-                    disease_confidence.item() * 100
-                )
+def main():
+    args = parse_arguments()
 
-                # Save at most once per interval so the camera loop does not
-                # send a database request for every video frame.
-                now = time.monotonic()
-                if now - last_firebase_update >= FIREBASE_UPDATE_INTERVAL:
-                    # Rate-limit attempts as well as successful writes. Without
-                    # this, a permissions or network error would retry once for
-                    # every detected cow in every frame.
-                    last_firebase_update = now
-                    try:
-                        save_prediction_to_firebase(
-                            final_prediction,
-                            disease_confidence.item(),
-                        )
-                        print(
-                            "Saved to Firebase:",
-                            final_prediction,
-                            f"({final_confidence:.1f}%)",
-                        )
-                    except requests.RequestException as error:
-                        print(f"Firebase connection failed: {error}")
-                    except RuntimeError as error:
-                        print(f"Firebase save failed: {error}")
+    device = get_device()
 
-                # Draw 
+    print("Device:", device)
+    print("Camera mode:", args.mode)
 
-                cv2.rectangle(
+    model_path = MODEL_PATHS[
+        args.mode
+    ]
+
+    disease_model, classes, transform = (
+        load_disease_model(
+            model_path,
+            device
+        )
+    )
+
+    print("Disease model loaded:", model_path.name)
+    print("Classes:", classes)
+
+    animal_detector = None
+
+    if args.mode == "cow":
+        if not YOLO_PATH.is_file():
+            raise FileNotFoundError(
+                f"YOLO model not found: {YOLO_PATH}"
+            )
+
+        animal_detector = YOLO(
+            YOLO_PATH
+        )
+
+        print("YOLO cow detector loaded")
+
+    camera = cv2.VideoCapture(
+        args.camera
+    )
+
+    if not camera.isOpened():
+        raise RuntimeError(
+            f"Could not open camera {args.camera}"
+        )
+
+    prediction_history = []
+    last_firebase_update = 0.0
+
+    window_title = (
+        "Whole Cow Disease AI"
+        if args.mode == "cow"
+        else "Udder Mastitis AI"
+    )
+
+    try:
+        while True:
+            success, frame = camera.read()
+
+            if not success:
+                print("Could not read camera frame")
+                break
+
+            region = None
+            display_box = None
+
+            # Whole-cow mode uses YOLO first
+            if args.mode == "cow":
+                display_box = find_best_cow(
                     frame,
-                    (x1, y1),
-                    (x2, y2),
-                    (0, 255, 0),
-                    2
+                    animal_detector
                 )
+
+                if display_box is not None:
+                    x1, y1, x2, y2 = display_box
+                    region = frame[y1:y2, x1:x2]
+                else:
+                    prediction_history.clear()
+
+                    cv2.putText(
+                        frame,
+                        "No cow detected",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 0, 255),
+                        2
+                    )
+
+            # Udder mode expects the udder to fill the frame
+            else:
+                region = frame
 
                 cv2.putText(
                     frame,
-                    f"{final_prediction} ({final_confidence:.1f}%)",
-                    (x1, y1 - 10),
+                    "Point camera closely at the udder",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.75,
+                    (255, 255, 0),
+                    2
+                )
+
+            if region is not None and region.size > 0:
+                rgb = cv2.cvtColor(
+                    region,
+                    cv2.COLOR_BGR2RGB
+                )
+
+                image = Image.fromarray(
+                    rgb
+                )
+
+                prediction, confidence = (
+                    classify_image(
+                        image,
+                        disease_model,
+                        classes,
+                        transform,
+                        device
+                    )
+                )
+
+                prediction_history.append(
+                    (prediction, confidence)
+                )
+
+                if (
+                    len(prediction_history)
+                    > HISTORY_SIZE
+                ):
+                    prediction_history.pop(0)
+
+                final_prediction, final_confidence = (
+                    smooth_prediction(
+                        prediction_history
+                    )
+                )
+
+                final_percentage = (
+                    final_confidence * 100
+                )
+
+                label = (
+                    f"{final_prediction} "
+                    f"({final_percentage:.1f}%)"
+                )
+
+                if args.mode == "cow":
+                    x1, y1, x2, y2 = display_box
+
+                    cv2.rectangle(
+                        frame,
+                        (x1, y1),
+                        (x2, y2),
+                        (0, 255, 0),
+                        2
+                    )
+
+                    text_position = (
+                        x1,
+                        max(30, y1 - 10)
+                    )
+                else:
+                    text_position = (
+                        20,
+                        80
+                    )
+
+                cv2.putText(
+                    frame,
+                    label,
+                    text_position,
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
                     (0, 255, 0),
                     2
                 )
 
-    cv2.imshow(
-        "Animal Disease AI",
-        frame
-    )
+                now = time.monotonic()
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+                if (
+                    not args.no_firebase
+                    and now - last_firebase_update
+                    >= FIREBASE_UPDATE_INTERVAL
+                ):
+                    last_firebase_update = now
 
-camera.release()
-cv2.destroyAllWindows()
+                    try:
+                        save_prediction_to_firebase(
+                            final_prediction,
+                            final_confidence,
+                            args.mode,
+                        )
+
+                        print(
+                            "Saved to Firebase:",
+                            args.mode,
+                            final_prediction,
+                            f"({final_percentage:.1f}%)"
+                        )
+
+                    except requests.RequestException as error:
+                        print(
+                            "Firebase connection failed:",
+                            error
+                        )
+
+                    except RuntimeError as error:
+                        print(
+                            "Firebase save failed:",
+                            error
+                        )
+
+            cv2.putText(
+                frame,
+                f"Mode: {args.mode} | Press Q to quit",
+                (20, frame.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2
+            )
+
+            cv2.imshow(
+                window_title,
+                frame
+            )
+
+            if (
+                cv2.waitKey(1) & 0xFF
+                == ord("q")
+            ):
+                break
+
+    finally:
+        camera.release()
+        cv2.destroyAllWindows()
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
